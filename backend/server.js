@@ -145,3 +145,16 @@ app.listen(PORT, () => {
   console.log(`🌶️  Kerala Spice Jar API running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
 });
+app.post('/api/messages', (req, res) => {
+  const { name, phone, message } = req.body;
+
+  console.log("📩 New Message:", name, phone, message);
+
+  res.json({ success: true });
+});
+// other routes...
+
+app.post('/api/messages', ...);
+
+// seed route (below or above)
+if (process.env.NODE_ENV === "development") {

@@ -1,4 +1,15 @@
 require("dotenv").config();
+
+// ── STARTUP SAFETY CHECKS ──────────────────────────────────────
+if (!process.env.JWT_SECRET) {
+  console.error("❌ FATAL: JWT_SECRET environment variable is not set. Refusing to start.");
+  process.exit(1);
+}
+if (!process.env.MONGODB_URI) {
+  console.error("❌ FATAL: MONGODB_URI environment variable is not set. Refusing to start.");
+  process.exit(1);
+}
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -7,13 +18,21 @@ const path = require("path");
 const app = express();
 
 // ── MIDDLEWARE ─────────────────────────────────────────────────
+// Fixed: replaced overly broad /\.vercel\.app$/ regex with explicit allowed origins
+const allowedOrigins = [
+  process.env.FRONTEND_URL || "http://localhost:3000",
+  "http://localhost:5500",
+  "http://127.0.0.1:5500",
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+].filter(Boolean);
+
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || "http://localhost:3000",
-    "http://localhost:5500",   // Live Server
-    "http://127.0.0.1:5500",
-    /\.vercel\.app$/,          // Vercel deployments
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g. curl, mobile apps)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: Origin ${origin} not allowed.`), false);
+  },
   credentials: true,
 }));
 
@@ -36,6 +55,16 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/products", require("./routes/products"));
 app.use("/api/orders", require("./routes/orders"));
 
+// Fixed: single /api/messages route (was duplicated and one had a syntax error)
+app.post("/api/messages", (req, res) => {
+  const { name, phone, message } = req.body;
+  if (!name || !phone || !message) {
+    return res.status(400).json({ success: false, message: "Name, phone, and message are required." });
+  }
+  console.log("📩 New Message:", name, phone, message);
+  res.json({ success: true, message: "Message received." });
+});
+
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({
@@ -47,6 +76,7 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── SEED DEMO DATA (dev only) ───────────────────────────────────
+// Fixed: was an unclosed if-block at the bottom; now properly closed
 if (process.env.NODE_ENV === "development") {
   app.post("/api/seed", async (req, res) => {
     try {
@@ -145,16 +175,3 @@ app.listen(PORT, () => {
   console.log(`🌶️  Kerala Spice Jar API running on port ${PORT}`);
   console.log(`🔗 Health: http://localhost:${PORT}/api/health`);
 });
-app.post('/api/messages', (req, res) => {
-  const { name, phone, message } = req.body;
-
-  console.log("📩 New Message:", name, phone, message);
-
-  res.json({ success: true });
-});
-// other routes...
-
-app.post('/api/messages', ...);
-
-// seed route (below or above)
-if (process.env.NODE_ENV === "development") {

@@ -62,11 +62,13 @@ router.post("/", async (req, res) => {
     await order.save();
 
     // Increment soldCount for each product
-    for (const item of enrichedItems) {
-      await Product.findByIdAndUpdate(item.product, {
-        $inc: { soldCount: item.quantity },
-      });
-    }
+    await Promise.all(
+      enrichedItems.map((item) =>
+        Product.findByIdAndUpdate(item.product, {
+          $inc: { soldCount: item.quantity },
+        })
+      )
+    );
 
     res.status(201).json({
       success: true,
@@ -152,6 +154,12 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT FIX: /analytics MUST be defined BEFORE /:id
+// Previously it was after /:id, so Express matched "analytics" as an order ID
+// (ObjectId cast error). Now correctly ordered.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // GET /api/orders/analytics — dashboard stats
 router.get("/analytics", authMiddleware, async (req, res) => {
   try {
@@ -179,24 +187,31 @@ router.get("/analytics", authMiddleware, async (req, res) => {
       ]),
     ]);
 
-    // Revenue trend (last 7 days)
-    const last7Days = [];
-    for (let i = 6; i >= 0; i--) {
+    // Fixed: Revenue trend (last 7 days) — was sequential await inside loop
+    // Now uses Promise.all for parallel DB queries
+    const dayRanges = Array.from({ length: 7 }, (_, i) => {
       const d = new Date();
-      d.setDate(d.getDate() - i);
+      d.setDate(d.getDate() - (6 - i));
       d.setHours(0, 0, 0, 0);
       const next = new Date(d);
       next.setDate(next.getDate() + 1);
-      const agg = await Order.aggregate([
-        { $match: { createdAt: { $gte: d, $lt: next }, status: { $ne: "Cancelled" } } },
-        { $group: { _id: null, revenue: { $sum: "$total" }, orders: { $sum: 1 } } },
-      ]);
-      last7Days.push({
-        date: d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric" }),
-        revenue: agg[0]?.revenue || 0,
-        orders: agg[0]?.orders || 0,
-      });
-    }
+      return { d, next };
+    });
+
+    const trendResults = await Promise.all(
+      dayRanges.map(({ d, next }) =>
+        Order.aggregate([
+          { $match: { createdAt: { $gte: d, $lt: next }, status: { $ne: "Cancelled" } } },
+          { $group: { _id: null, revenue: { $sum: "$total" }, orders: { $sum: 1 } } },
+        ])
+      )
+    );
+
+    const last7Days = dayRanges.map(({ d }, i) => ({
+      date: d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric" }),
+      revenue: trendResults[i][0]?.revenue || 0,
+      orders: trendResults[i][0]?.orders || 0,
+    }));
 
     res.json({
       success: true,
@@ -218,7 +233,7 @@ router.get("/analytics", authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/orders/:id
+// GET /api/orders/:id  (kept AFTER /analytics to avoid route collision)
 router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);

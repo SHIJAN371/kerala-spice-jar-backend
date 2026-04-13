@@ -4,23 +4,67 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const authMiddleware = require("../middleware/auth");
 
-// In-memory admin store (replace with DB in production)
-// Passwords stored as bcrypt hashes
+// ── SIMPLE IN-MEMORY RATE LIMITER ─────────────────────────────
+// Limits login attempts to 5 per IP per 15 minutes
+// No external package required — works with the existing stack
+const loginAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+// Periodically clean up expired entries to avoid memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of loginAttempts.entries()) {
+    if (now > data.resetAt) loginAttempts.delete(ip);
+  }
+}, 10 * 60 * 1000); // clean every 10 minutes
+
+const loginRateLimiter = (req, res, next) => {
+  const ip = req.ip || req.connection?.remoteAddress || "unknown";
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + WINDOW_MS };
+  }
+
+  if (entry.count >= MAX_ATTEMPTS) {
+    const retryAfterMinutes = Math.ceil((entry.resetAt - now) / 1000 / 60);
+    return res.status(429).json({
+      success: false,
+      message: `Too many login attempts. Please try again in ${retryAfterMinutes} minute(s).`,
+    });
+  }
+
+  entry.count++;
+  loginAttempts.set(ip, entry);
+  req._loginIp = ip; // pass IP to route for reset on success
+  next();
+};
+
+// ── ADMIN STORE ────────────────────────────────────────────────
+// Note: adminStore is in-memory and resets on server restart.
+// For production, persist admin credentials in MongoDB or use
+// environment variables exclusively for the password hash.
 let adminStore = null;
 
 const getAdmin = () => {
   if (!adminStore) {
     adminStore = {
       username: process.env.ADMIN_USERNAME || "admin",
-      // Default hash for "spicejar@admin123" - will be replaced on first setup
-      passwordHash: bcrypt.hashSync(process.env.ADMIN_PASSWORD || "spicejar@admin123", 10),
+      passwordHash: bcrypt.hashSync(
+        process.env.ADMIN_PASSWORD || "spicejar@admin123",
+        10
+      ),
     };
   }
   return adminStore;
 };
 
+// ── ROUTES ─────────────────────────────────────────────────────
+
 // POST /api/auth/login
-router.post("/login", async (req, res) => {
+router.post("/login", loginRateLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
 
@@ -38,6 +82,9 @@ router.post("/login", async (req, res) => {
     if (!isMatch) {
       return res.status(401).json({ success: false, message: "Invalid credentials." });
     }
+
+    // Reset rate limit counter on successful login
+    if (req._loginIp) loginAttempts.delete(req._loginIp);
 
     const token = jwt.sign(
       { username: admin.username, role: "admin" },
